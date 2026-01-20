@@ -4,12 +4,15 @@ import { getPublicEntryIds } from "@/lib/google-forms";
 export async function POST(req: NextRequest) {
     try {
         const body = await req.json();
-        const { responses } = body;
-        const publishedFormId = process.env.GOOGLE_FORM_PUBLISHED_ID;
+        const { responses, type = "competitor" } = body;
+
+        const publishedFormId = type === "attendee"
+            ? process.env.ATTENDEE_FORM_PUBLISHED_ID
+            : process.env.GOOGLE_FORM_PUBLISHED_ID;
 
         if (!publishedFormId) {
             return NextResponse.json(
-                { error: "Server configuration error: Missing Form ID" },
+                { error: `Server configuration error: Missing Published Form ID for '${type}'` },
                 { status: 500 }
             );
         }
@@ -47,62 +50,14 @@ export async function POST(req: NextRequest) {
         }
 
         // Helper to find Row ID for a Grid Question
-        // We look up the Grid Title in the map, which should return an object of RowLabel -> ID
         const findEntryIdForGridRow = (gridTitleId: string, rowLabel: string): string | null => {
-            // Reverse lookup: We have the ID (gridTitleId), we need to find the Title
-            // Then look up the row map.
-            // Actually, we received 'responses' keyed by Question ID (which is the main ID).
-            // For Grids, the main ID is usually the Grid Header ID.
+            // Because we now pass the Row Entry ID directly from the frontend (which got it from route.ts),
+            // we ironically don't need to look it up here anymore if the frontend is sending the correct ID.
+            // However, just in case, we can keep the logic or rely on the frontend payload.
 
-            // Iterate map to find entry matching our ID
-            for (const [title, entryData] of entryIdMap.entries()) {
-                if (typeof entryData === 'object') {
-                    // Check if this grid's "header" ID matches? 
-                    // Actually, our API returns "grid_ITEMID" or specific ID for grids.
-                    // The frontend sends what we gave it.
-
-                    // IF the key matches a known title's top-level ID?
-                    // But for IDs that are objects, what is the key in 'responses'?
-                    // It's the ID we assigned in route.ts.
-
-                    // Heuristic: Check if the key provided in responses matches any known Row Map values?
-                    // No, key is the Question ID.
-
-                    // The easiest way is if we can link the 'key' (QuestionID) back to the 'Title'.
-                    // Since we don't have that link easily here without fetching form structure again...
-
-                    // WAIT: The frontend sends responses keyed by the ID we sent it.
-                    // In route.ts, we used: id: "grid_" + item.itemId OR scraper ID.
-
-                    // So if it's a grid, and we successfully scraped it, entryData is an object.
-                    // So ID becomes "grid_" + item.itemId.
-
-                    // This means 'key' in responses is "grid_...". 
-                    // We can't lookup by "grid_...". We need to Match Title.
-
-                    // STRATEGY: 
-                    // We need to match the responses key to the Form Item Title?
-                    // We can't easily.
-
-                    // BETTER STRATEGY:
-                    // Just look for ANY grid in our map that contains the row label?
-                    // That's risky if two grids have same row labels.
-
-                    // CORRECT STRATEGY:
-                    // We need to fetch the Form Structure (via API) to map IDs to Titles first?
-                    // That's slow.
-
-                    // ALTERNATIVE:
-                    // Iterate over all entries in entryIdMap. 
-                    // If it's a grid (object), check if it has the row label we are trying to submit.
-                    // If yes, use that ID.
-
-                    if (entryData[rowLabel]) {
-                        return entryData[rowLabel];
-                    }
-                }
-            }
-            return null;
+            // Actually, based on line 113 below: `Object.entries(valObj).forEach(([rowEntryId, colVal])`
+            // The frontend is sending the ID as the key. So we TRUST the frontend ID.
+            return null; // logic not used in current flow
         };
 
         // Loop through incoming answers
@@ -145,20 +100,14 @@ export async function POST(req: NextRequest) {
                         submitData.append(`entry.${key}_second`, String(valObj.seconds || 0));
                     }
                 } else {
-                    // Assume Grid: Keys are Row Labels, Values are Column Values
-                    Object.entries(valObj).forEach(([rowLabel, colVal]) => {
-                        // Find ID for this Row Label
-                        // We pass the Question Key (key) but mostly we rely on matching the label
-                        const rowEntryId = findEntryIdForGridRow(key, rowLabel);
-
-                        if (rowEntryId) {
-                            if (Array.isArray(colVal)) {
-                                colVal.forEach(c => submitData.append(`entry.${rowEntryId}`, String(c)));
-                            } else {
-                                submitData.append(`entry.${rowEntryId}`, String(colVal));
-                            }
+                    // Grid: Keys are Row Entry IDs !! (Thanks to our frontend update)
+                    // Values are Column Values
+                    Object.entries(valObj).forEach(([rowEntryId, colVal]) => {
+                        // rowEntryId comes directly from the frontend (which got it from route.ts)
+                        if (Array.isArray(colVal)) {
+                            colVal.forEach(c => submitData.append(`entry.${rowEntryId}`, String(c)));
                         } else {
-                            console.warn(`Could not find Entry ID for Grid Row: ${rowLabel}`);
+                            submitData.append(`entry.${rowEntryId}`, String(colVal));
                         }
                     });
                 }
@@ -189,7 +138,7 @@ export async function POST(req: NextRequest) {
             }
         });
 
-        console.log("--- SUBMISSION DEBUG V3 ---");
+        console.log("--- SUBMISSION DEBUG V4 ---");
         console.log("Target URL:", submitUrl);
         console.log("Payload:", Object.fromEntries(submitData));
         console.log("---------------------------");
@@ -213,15 +162,19 @@ export async function POST(req: NextRequest) {
         console.error("Google Forms Submission Failed:", {
             status: submitResponse.status,
             statusText: submitResponse.statusText,
+            url: submitUrl,
+            params: Object.fromEntries(submitData),
             response: errorText
         });
 
+        // Return the error details to the client
         return NextResponse.json(
             {
                 error: `Form submission failed with status ${submitResponse.status}`,
-                details: errorText.substring(0, 500) // First 500 chars 
+                details: errorText, // Send full text, might be HTML but contains clues
+                debugPayload: Object.fromEntries(submitData) // Helping debug
             },
-            { status: 500 }
+            { status: submitResponse.status } // Propagate the status code (e.g. 400)
         );
     } catch (error) {
         console.error("Error submitting form:", error);
