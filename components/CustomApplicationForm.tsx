@@ -3,9 +3,12 @@
 import { useState, useEffect } from "react";
 import { useSession, signIn } from "next-auth/react";
 
+
+// hello world (testing smth)
 // Type definitions for form data
 interface FormQuestion {
     id: string;
+    entryId?: string; // Actual Google Form Entry ID
     type: string;
     label: string;
     required: boolean;
@@ -14,7 +17,7 @@ interface FormQuestion {
     max?: number;
     minLabel?: string;
     maxLabel?: string;
-    rows?: string[];
+    rows?: { id: string, entryId?: string, label: string }[];
     columns?: string[];
     placeholder?: string;
 }
@@ -39,15 +42,15 @@ export function CustomApplicationForm({ onSubmitSuccess }: CustomApplicationForm
     const [error, setError] = useState<string | null>(null);
     const [success, setSuccess] = useState(false);
     const [responses, setResponses] = useState<FormResponses>({});
+    const [formType, setFormType] = useState<"competitor" | "attendee">("competitor");
 
-    // Fetch form data from API
+    // 1. Initial Fetch
     useEffect(() => {
         async function fetchForm() {
+            setLoading(true);
             try {
-                const res = await fetch("/api/forms");
-                if (!res.ok) {
-                    throw new Error("Failed to fetch form");
-                }
+                const res = await fetch(`/api/forms?type=${formType}`);
+                if (!res.ok) throw new Error("Failed to fetch form");
                 const data = await res.json();
                 setFormData(data);
                 setError(null);
@@ -59,7 +62,14 @@ export function CustomApplicationForm({ onSubmitSuccess }: CustomApplicationForm
             }
         }
         fetchForm();
-    }, []);
+    }, [formType]);
+
+    // 2. Prefetch the "other" form for instant switching
+    useEffect(() => {
+        const otherType = formType === "competitor" ? "attendee" : "competitor";
+        // Simple silent fetch to warm up server cache and browser cache
+        fetch(`/api/forms?type=${otherType}`).catch(() => { });
+    }, [formType]);
 
     const updateResponse = (questionId: string, value: unknown) => {
         setResponses((prev) => ({ ...prev, [questionId]: value }));
@@ -111,15 +121,50 @@ export function CustomApplicationForm({ onSubmitSuccess }: CustomApplicationForm
         setSubmitting(true);
         setError(null);
 
+        // Transform responses to use Entry IDs instead of React Keys
+        const submissionPayload: Record<string, unknown> = {};
+
+        if (formData) {
+            formData.questions.forEach((q) => {
+                const answer = responses[q.id];
+                if (answer === undefined || answer === "") return;
+
+                // Handle standard questions
+                if (q.entryId) {
+                    submissionPayload[q.entryId] = answer;
+                }
+
+                // Handle Grid Questions
+                // For grids, the answer is an object { [rowUniqueId]: val }
+                // We need to map rowUniqueId -> rowEntryId
+                if (q.rows && typeof answer === 'object' && answer !== null) {
+                    const gridAnswer = answer as Record<string, any>;
+                    q.rows.forEach((row) => {
+                        const rowVal = gridAnswer[row.id];
+                        if (rowVal !== undefined && row.entryId) {
+                            // Add to payload using the ROW'S entry ID
+                            submissionPayload[row.entryId] = rowVal;
+                        }
+                    });
+                }
+            });
+        }
+
+        // Debug
+        console.log("Submitting Payload Maps:", submissionPayload);
+
         try {
             const res = await fetch("/api/forms/submit", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ responses }),
+                body: JSON.stringify({ responses: submissionPayload, type: formType }),
             });
 
             if (!res.ok) {
                 const data = await res.json();
+                console.error("Submission failed details:", data);
+                // If we have details, log them clearly. 
+                // We keep the UI simple but ensure the console has the validation error.
                 throw new Error(data.error || "Failed to submit");
             }
 
@@ -325,42 +370,50 @@ export function CustomApplicationForm({ onSubmitSuccess }: CustomApplicationForm
                                 </tr>
                             </thead>
                             <tbody>
-                                {question.rows?.map((row, rowIndex) => (
-                                    <tr
-                                        key={row}
-                                        className={rowIndex % 2 === 0 ? "bg-zinc-50 dark:bg-zinc-800/30" : ""}
-                                    >
-                                        <td className="p-3 text-sm text-zinc-700 dark:text-zinc-300 font-medium">{row}</td>
-                                        {question.columns?.map((col) => {
-                                            const gridData = (responses[question.id] as Record<string, string | string[]>) || {};
-                                            const isSelected = isCheckboxGrid
-                                                ? ((gridData[row] as string[]) || []).includes(col)
-                                                : gridData[row] === col;
-                                            return (
-                                                <td key={col} className="p-3 text-center">
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => handleGridChange(question.id, row, col, isCheckboxGrid)}
-                                                        className={`w-6 h-6 rounded-${isCheckboxGrid ? "md" : "full"} border-2 transition-all inline-flex items-center justify-center ${isSelected
-                                                            ? "bg-[#007b8a] border-[#007b8a] dark:bg-[#007b8a] dark:border-[#007b8a]"
-                                                            : "border-zinc-300 dark:border-zinc-600 hover:border-[#007b8a]"
-                                                            }`}
-                                                    >
-                                                        {isSelected && (
-                                                            isCheckboxGrid ? (
-                                                                <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                                                                </svg>
-                                                            ) : (
-                                                                <div className="w-2.5 h-2.5 rounded-full bg-white" />
-                                                            )
-                                                        )}
-                                                    </button>
-                                                </td>
-                                            );
-                                        })}
-                                    </tr>
-                                ))}
+                                {question.rows?.map((rowItem, rowIndex) => {
+                                    // Handle row as Object (new) or String (legacy fallback)
+                                    const rowLabel = typeof rowItem === 'string' ? rowItem : rowItem.label;
+                                    const rowId = typeof rowItem === 'string' ? rowItem : rowItem.id;
+
+                                    return (
+                                        <tr
+                                            key={`${rowId}-${rowIndex}`} // Use composite key to prevent duplicates
+
+                                            className={rowIndex % 2 === 0 ? "bg-zinc-50 dark:bg-zinc-800/30" : ""}
+                                        >
+                                            <td className="p-3 text-sm text-zinc-700 dark:text-zinc-300 font-medium">{rowLabel}</td>
+                                            {question.columns?.map((col) => {
+                                                const gridData = (responses[question.id] as Record<string, string | string[]>) || {};
+                                                const isSelected = isCheckboxGrid
+                                                    ? ((gridData[rowId] as string[]) || []).includes(col)
+                                                    : gridData[rowId] === col;
+                                                return (
+                                                    <td key={col} className="p-3 text-center">
+                                                        <button
+                                                            type="button"
+                                                            // Pass rowId instead of rowLabel to handler
+                                                            onClick={() => handleGridChange(question.id, rowId, col, isCheckboxGrid)}
+                                                            className={`w-6 h-6 rounded-${isCheckboxGrid ? "md" : "full"} border-2 transition-all inline-flex items-center justify-center ${isSelected
+                                                                ? "bg-indigo-600 border-indigo-600 dark:bg-indigo-500 dark:border-indigo-500"
+                                                                : "border-zinc-300 dark:border-zinc-600 hover:border-indigo-400"
+                                                                }`}
+                                                        >
+                                                            {isSelected && (
+                                                                isCheckboxGrid ? (
+                                                                    <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                                                                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                                                    </svg>
+                                                                ) : (
+                                                                    <div className="w-2.5 h-2.5 rounded-full bg-white" />
+                                                                )
+                                                            )}
+                                                        </button>
+                                                    </td>
+                                                );
+                                            })}
+                                        </tr>
+                                    );
+                                })}
                             </tbody>
                         </table>
                     </div>
@@ -524,23 +577,40 @@ export function CustomApplicationForm({ onSubmitSuccess }: CustomApplicationForm
             )}
 
             {/* Form Header */}
-            <div className="relative overflow-hidden bg-black px-8 py-16 text-center border-b border-zinc-800">
-                {/* Subtle Background Pattern */}
-                <div className="absolute inset-0 opacity-10 pointer-events-none" 
-                     style={{ backgroundImage: 'radial-gradient(#007b8a 1px, transparent 1px)', backgroundSize: '20px 20px' }} />
-                
-                <h3 className="relative z-10 text-3xl sm:text-4xl font-black tracking-tighter uppercase text-white mb-2">
-                    {formData.title}
-                </h3>
-                <p className="relative z-10 text-zinc-400 font-medium tracking-wide uppercase text-sm">
-                    {formData.description}
-                </p>
-                {session && (
-                    <div className="relative z-10 mt-4 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-zinc-900/50 border border-zinc-800 text-[10px] text-zinc-500 uppercase tracking-widest font-bold">
-                        <div className="w-1.5 h-1.5 rounded-full bg-[#007b8a]" />
-                        {session.user?.email}
+            <div className="bg-gradient-to-r from-indigo-600 to-purple-600 px-8 py-10 text-center relative overflow-hidden">
+                {/* Type Toggle */}
+                <div className="absolute top-4 right-4 z-10">
+                    <div className="inline-flex p-1 bg-white/20 backdrop-blur-md rounded-xl border border-white/30">
+                        <button
+                            onClick={() => setFormType("competitor")}
+                            className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition-all ${formType === "competitor"
+                                ? "bg-white text-indigo-600 shadow-lg"
+                                : "text-white hover:bg-white/10"
+                                }`}
+                        >
+                            Competitor
+                        </button>
+                        <button
+                            onClick={() => setFormType("attendee")}
+                            className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition-all ${formType === "attendee"
+                                ? "bg-white text-indigo-600 shadow-lg"
+                                : "text-white hover:bg-white/10"
+                                }`}
+                        >
+                            Attendee
+                        </button>
                     </div>
-                )}
+                </div>
+
+                <div className="relative z-0">
+                    <h3 className="text-2xl font-bold text-white">{formData.title}</h3>
+                    <p className="mt-2 text-indigo-100">{formData.description}</p>
+                    {session && (
+                        <p className="mt-3 text-sm text-indigo-200">
+                            Signed in as {session.user?.email}
+                        </p>
+                    )}
+                </div>
             </div>
 
             {/* Questions */}
