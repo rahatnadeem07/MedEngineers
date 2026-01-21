@@ -66,7 +66,11 @@ export async function GET() {
                 if (!item.questionItem && !item.questionGroupItem) continue;
 
                 const title = item.title || "";
-                const entryData = entryIdMap.get(title);
+                
+                // Get list of IDs for this title and pop the first one (FIFO)
+                const entryList = entryIdMap.get(title);
+                const entryData = entryList && entryList.length > 0 ? entryList.shift() : undefined;
+                
                 const submissionId = typeof entryData === 'string' ? entryData : item.itemId || "";
 
                 if (item.questionItem) {
@@ -123,6 +127,9 @@ export async function GET() {
                     // Frontend doesn't need to change if we handle the mapping in submit route
                     // BUT for now we just want to ensure we have the data here
 
+                    // If we got a grid object back (not string), use it
+                    // The entryData logic above handles FIFO for grids too if titles matched
+                    
                     const gridQuestion: FormQuestion = {
                         id: typeof entryData === 'string' ? entryData : "grid_" + item.itemId, // Identify as grid
                         type: isCheckbox ? "grid_checkbox" : "grid_radio",

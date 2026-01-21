@@ -1,5 +1,5 @@
-export async function getPublicEntryIds(publishedId: string): Promise<Map<string, string | Record<string, string>>> {
-    const mapping = new Map<string, string | Record<string, string>>();
+export async function getPublicEntryIds(publishedId: string): Promise<Map<string, (string | Record<string, string>)[]>> {
+    const mapping = new Map<string, (string | Record<string, string>)[]>();
     try {
         const url = `https://docs.google.com/forms/d/e/${publishedId}/viewform`;
         const res = await fetch(url);
@@ -28,8 +28,10 @@ export async function getPublicEntryIds(publishedId: string): Promise<Map<string
                         const firstID = answerData[0][0];
                         // If firstID is numeric, it's likely a simple question
                         if (typeof firstID === 'number' || (typeof firstID === 'string' && /^\d+$/.test(firstID))) {
-                            mapping.set(title, String(firstID));
-                            console.log(`  -> Simple ID: ${firstID}`);
+                            const currentList = mapping.get(title) || [];
+                            currentList.push(String(firstID));
+                            mapping.set(title, currentList);
+                            console.log(`  -> Simple ID: ${firstID} (Count: ${currentList.length})`);
                         }
                     }
 
@@ -59,7 +61,9 @@ export async function getPublicEntryIds(publishedId: string): Promise<Map<string
                         });
 
                         if (isGrid) {
-                            mapping.set(title, rowMap);
+                            const currentList = mapping.get(title) || [];
+                            currentList.push(rowMap);
+                            mapping.set(title, currentList);
                         }
                     }
                 });
